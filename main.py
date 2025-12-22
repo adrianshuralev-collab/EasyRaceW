@@ -11,7 +11,7 @@ FULLSCREEN_DEFAULT = True
 info = pygame.display.Info()
 NATIVE_WIDTH, NATIVE_HEIGHT = info.current_w, info.current_h
 FPS = 60
-TILE_SIZE = 16
+TILE_SIZE = 24
 
 # Типы покрытия
 SURFACE_TYPES = {
@@ -65,7 +65,7 @@ class Car:
         self.acceleration = 0.15
         self.friction = 0.1
         self.steering = 2.5
-        self.handbrake = False  # ← НОВОЕ: флаг ручника
+        self.handbrake = False
 
         self.original_image = pygame.Surface((100, 50))
         self.original_image.fill((255, 0, 0))
@@ -118,6 +118,7 @@ class Game:
         self.set_display_mode()
         self.clock = pygame.time.Clock()
         self.running = True
+        self.zoom = 1.5
 
         self.track = Track(track_path)
         start = self.track.start_pos
@@ -156,44 +157,67 @@ class Game:
             self.clock.tick(FPS)
 
     def render(self):
-        camera_x = self.car.x - self.display_width // 2
-        camera_y = self.car.y - self.display_height // 2
+        # Камера следует за машиной
+        camera_x = self.car.x - self.display_width // (2 * self.zoom)
+        camera_y = self.car.y - self.display_height // (2 * self.zoom)
+
         self.screen.fill((0, 0, 0))
 
+        # Рисуем трассу с учётом масштаба
         for y in range(self.track.height):
             for x in range(self.track.width):
                 tile_id = self.track.grid[y][x]
                 color = SURFACE_TYPES[tile_id]['color']
                 world_x = x * self.track.tile_size
                 world_y = y * self.track.tile_size
-                screen_x = world_x - camera_x
-                screen_y = world_y - camera_y
-                rect = pygame.Rect(screen_x, screen_y, self.track.tile_size, self.track.tile_size)
-                if -self.track.tile_size < screen_x < self.display_width and -self.track.tile_size < screen_y < self.display_height:
+
+                # Преобразуем мировые координаты в экранные с учётом zoom
+                screen_x = (world_x - camera_x) * self.zoom
+                screen_y = (world_y - camera_y) * self.zoom
+                scaled_tile_size = self.track.tile_size * self.zoom
+
+                rect = pygame.Rect(screen_x, screen_y, scaled_tile_size, scaled_tile_size)
+                # Отрисовываем только то, что видно (с небольшим запасом)
+                if -scaled_tile_size < screen_x < self.display_width and -scaled_tile_size < screen_y < self.display_height:
                     pygame.draw.rect(self.screen, color, rect)
 
-        car_screen_x = self.car.x - camera_x
-        car_screen_y = self.car.y - camera_y
-        rotated_image = pygame.transform.rotate(self.car.original_image, -self.car.angle)
+        # Рисуем машину
+        car_screen_x = (self.car.x - camera_x) * self.zoom
+        car_screen_y = (self.car.y - camera_y) * self.zoom
+
+        # Масштабируем изображение машины (опционально, для соответствия)
+        scaled_car = pygame.transform.scale(
+            self.car.original_image,
+            (int(100 * self.zoom), int(50 * self.zoom))
+        )
+        rotated_image = pygame.transform.rotate(scaled_car, -self.car.angle)
         car_rect = rotated_image.get_rect(center=(car_screen_x, car_screen_y))
         self.screen.blit(rotated_image, car_rect.topleft)
+
         pygame.display.flip()
 
-# === НОВЫЙ РЕДАКТОР ТРЕСС (с кистью и большим полотном) ===
+# === РЕДАКТОР ТРЕСС ===
 def run_track_editor(slot_name="track_01.json"):
     MAX_GRID_WIDTH = 100
     MAX_GRID_HEIGHT = 100
-    TILE_SIZE_EDIT = 16
+
+    # 🔹 ВИЗУАЛЬНЫЙ размер тайла в редакторе (только для отрисовки и ввода!)
+    EDITOR_PIXEL_SIZE = 8
+
+    # 🔹 ЛОГИЧЕСКИЙ размер тайла (будет сохранён в файл и использован в игре)
+    LOGICAL_TILE_SIZE = 24
 
     track_path = os.path.join("tracks", slot_name)
 
+    # Загрузка существующей трассы (если есть)
     if os.path.exists(track_path):
         with open(track_path, 'r') as f:
             data = json.load(f)
+        # ВСЕГДА используем LOGICAL_TILE_SIZE при загрузке!
+        # Но сетка и размеры остаются те же
         width = min(data['width'], MAX_GRID_WIDTH)
         height = min(data['height'], MAX_GRID_HEIGHT)
         grid = data['grid']
-        # Обрезаем/дополняем сетку
         if len(grid) != height or len(grid[0]) != width:
             new_grid = [[0 for _ in range(width)] for _ in range(height)]
             for y in range(min(len(grid), height)):
@@ -202,16 +226,17 @@ def run_track_editor(slot_name="track_01.json"):
             grid = new_grid
         start_pos = data.get('start_position', {"x": width//2, "y": height//2, "angle": 0})
     else:
-        width = 100  # Новая трасса — сразу большая!
-        height = 80
+        # Новая трасса
+        width = 1000
+        height = 500
         grid = [[0 for _ in range(width)] for _ in range(height)]
         start_pos = {"x": width//2, "y": height//2, "angle": 0}
 
-    # Ограничение окна
+    # Настройка окна редактора (ограничено, но масштабируемо)
     MAX_WIN_W = min(1200, NATIVE_WIDTH)
     MAX_WIN_H = min(800, NATIVE_HEIGHT - 100)
-    win_w = min(width * TILE_SIZE_EDIT, MAX_WIN_W)
-    win_h = min(height * TILE_SIZE_EDIT, MAX_WIN_H) + 60
+    win_w = min(width * EDITOR_PIXEL_SIZE, MAX_WIN_W)
+    win_h = min(height * EDITOR_PIXEL_SIZE, MAX_WIN_H) + 60
 
     screen = pygame.display.set_mode((win_w, win_h))
     pygame.display.set_caption(f"Редактор — {slot_name} ({width}x{height})")
@@ -219,7 +244,7 @@ def run_track_editor(slot_name="track_01.json"):
     clock = pygame.time.Clock()
 
     current_type = 1
-    brush_size = 1  # 1, 3, 5
+    brush_size = 1
     drawing = False
 
     def apply_brush(cx, cy, size, value):
@@ -233,8 +258,9 @@ def run_track_editor(slot_name="track_01.json"):
     running = True
     while running:
         mouse_x, mouse_y = pygame.mouse.get_pos()
-        tile_x = mouse_x // TILE_SIZE_EDIT
-        tile_y = mouse_y // TILE_SIZE_EDIT
+        # 🔹 Преобразуем ПИКСЕЛИ → КООРДИНАТЫ ТАЙЛОВ (через EDITOR_PIXEL_SIZE)
+        tile_x = mouse_x // EDITOR_PIXEL_SIZE
+        tile_y = mouse_y // EDITOR_PIXEL_SIZE
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -249,17 +275,18 @@ def run_track_editor(slot_name="track_01.json"):
                 if event.key == pygame.K_w: brush_size = 3
                 if event.key == pygame.K_e: brush_size = 5
                 if event.key == pygame.K_s:
+                    # 🔹 Сохраняем с LOGICAL_TILE_SIZE!
                     track_data = {
                         "name": f"Custom Track - {slot_name}",
                         "width": width,
                         "height": height,
-                        "tile_size": TILE_SIZE_EDIT,
+                        "tile_size": LOGICAL_TILE_SIZE,  # ← ВАЖНО!
                         "grid": grid,
                         "start_position": start_pos
                     }
                     with open(track_path, "w") as f:
                         json.dump(track_data, f, indent=2)
-                    print(f"✅ Сохранено: {track_path}")
+                    print(f"✅ Сохранено: {track_path} (tile_size={LOGICAL_TILE_SIZE})")
 
             if event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1 and 0 <= tile_x < width and 0 <= tile_y < height:
@@ -275,29 +302,32 @@ def run_track_editor(slot_name="track_01.json"):
                 if 0 <= tile_x < width and 0 <= tile_y < height:
                     apply_brush(tile_x, tile_y, brush_size, current_type)
 
+        # 🔹 Отрисовка: используем EDITOR_PIXEL_SIZE для размера тайлов на экране
         screen.fill((0, 0, 0))
         for y in range(height):
             for x in range(width):
-                screen_x = x * TILE_SIZE_EDIT
-                screen_y = y * TILE_SIZE_EDIT
-                if 0 <= screen_x < win_w and 0 <= screen_y < win_h:
+                screen_x = x * EDITOR_PIXEL_SIZE
+                screen_y = y * EDITOR_PIXEL_SIZE
+                if 0 <= screen_x < win_w and 0 <= screen_y < win_h - 60:  # учитываем панель статуса
                     color = SURFACE_TYPES[grid[y][x]]["color"]
-                    rect = pygame.Rect(screen_x, screen_y, TILE_SIZE_EDIT, TILE_SIZE_EDIT)
+                    rect = pygame.Rect(screen_x, screen_y, EDITOR_PIXEL_SIZE, EDITOR_PIXEL_SIZE)
                     pygame.draw.rect(screen, color, rect)
                     pygame.draw.rect(screen, (50, 50, 50), rect, 1)
 
-        sx = start_pos["x"] * TILE_SIZE_EDIT + TILE_SIZE_EDIT//2
-        sy = start_pos["y"] * TILE_SIZE_EDIT + TILE_SIZE_EDIT//2
-        if 0 <= sx < win_w and 0 <= sy < win_h:
-            pygame.draw.line(screen, (255,0,0), (sx-5, sy), (sx+5, sy), 2)
-            pygame.draw.line(screen, (255,0,0), (sx, sy-5), (sx, sy+5), 2)
+        # Стартовая позиция (отображается в редакторе)
+        sx = start_pos["x"] * EDITOR_PIXEL_SIZE + EDITOR_PIXEL_SIZE // 2
+        sy = start_pos["y"] * EDITOR_PIXEL_SIZE + EDITOR_PIXEL_SIZE // 2
+        if 0 <= sx < win_w and 0 <= sy < win_h - 60:
+            pygame.draw.line(screen, (255, 0, 0), (sx - 3, sy), (sx + 3, sy), 2)
+            pygame.draw.line(screen, (255, 0, 0), (sx, sy - 3), (sx, sy + 3), 2)
 
         status = (
             f"Слот: {slot_name} | {width}x{height} | "
             f"Тип: {SURFACE_TYPES[current_type]['name']} (1/2/3) | "
-            f"Кисть: {brush_size}x{brush_size} (Q/W/E) | S=сохранить"
+            f"Кисть: {brush_size}x{brush_size} (Q/W/E) | S=сохранить | "
+            f"Экран: {EDITOR_PIXEL_SIZE}px/тайл → Файл: {LOGICAL_TILE_SIZE}"
         )
-        screen.blit(font.render(status, True, (255,255,255)), (10, win_h - 30))
+        screen.blit(font.render(status, True, (255, 255, 255)), (10, win_h - 30))
 
         pygame.display.flip()
         clock.tick(60)
