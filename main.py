@@ -57,6 +57,8 @@ class Track:
 
 class Car:
     def __init__(self, x, y, angle=0):
+        self.brake_factor = 1.0
+        self.braking = False
         self.x = x
         self.y = y
         self.angle = angle
@@ -74,24 +76,31 @@ class Car:
             self.original_image = pygame.transform.scale(self.original_image, (100, 50))
 
     def update(self, keys, track):
-        # Управление газом/тормозом
+        # Управление газом
         if keys[pygame.K_w]:
             self.speed += self.acceleration
-        if keys[pygame.K_s]:
-            self.speed -= self.acceleration * 0.7
 
         # Ограничение скорости
         self.speed = max(-self.max_speed / 2, min(self.speed, self.max_speed))
 
-        # Фрикцион (плавное торможение)
+        # Фрикцион (плавное торможение), если не нажаты W/S
         if not (keys[pygame.K_w] or keys[pygame.K_s]):
             if self.speed > 0:
                 self.speed = max(0, self.speed - self.friction)
             elif self.speed < 0:
                 self.speed = min(0, self.speed + self.friction)
 
-        # ← НОВОЕ: ручной тормоз (пробел)
+        # Ручной тормоз (пробел)
         self.handbrake = keys[pygame.K_SPACE]
+
+        # Плавный тормоз на S: управление brake_factor
+        if keys[pygame.K_s]:
+            # Постепенно снижаем сцепление (экспоненциальное затухание)
+            self.brake_factor *= 0.92  # можно настроить: 0.9 = медленнее, 0.8 = быстрее
+            self.brake_factor = max(0.0, self.brake_factor)
+        else:
+            # Мгновенно восстанавливаем сцепление при отпускании
+            self.brake_factor = 1.0
 
         # Поворот (руль)
         if keys[pygame.K_a]:
@@ -104,10 +113,15 @@ class Car:
         dx = self.speed * math.cos(rad)
         dy = self.speed * math.sin(rad)
 
-        # ← НОВОЕ: сцепление зависит от ручника!
+        # Получаем базовое сцепление от трассы
         surf = track.get_surface_info(self.x + dx, self.y + dy)
-        traction = surf['traction']
-        if self.handbrake:
+        base_traction = surf['traction']
+
+        # Применяем тормоз (плавное снижение сцепления)
+        traction = base_traction * self.brake_factor
+
+        # Ручной тормоз дополнительно снижает сцепление (если не обнулено)
+        if self.handbrake and traction > 0:
             traction *= 0.05
 
         self.x += dx * traction
