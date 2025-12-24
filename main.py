@@ -61,10 +61,10 @@ class Car:
         self.y = y
         self.angle = angle
         self.speed = 0
-        self.max_speed = 10.0
-        self.acceleration = 0.15
+        self.max_speed = 15.0
+        self.acceleration = 0.1
         self.friction = 0.1
-        self.steering = 2.5
+        self.steering = 3.0
         self.handbrake = False
 
         self.original_image = pygame.Surface((100, 50))
@@ -546,3 +546,4 @@ def main_menu():
 # === ЗАПУСК ===
 if __name__ == "__main__":
     main_menu()
+
