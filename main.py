@@ -3,7 +3,11 @@ import json
 import os
 import math
 import sys
-from datetime import datetime
+import numpy as np
+import gym
+import gymnasium as gym
+from gym import spaces
+from stable_baselines3.common.env_checker import check_env  # для отладки
 
 pygame.init()
 
@@ -36,7 +40,7 @@ def load_image(path, fallback_color=(100, 100, 100)):
         return surf
 
 
-# === Классы игры (Car, Track, Game) ===
+# === Классы игры ===
 class Track:
     def __init__(self, filename):
         with open(filename, 'r') as f:
@@ -47,7 +51,6 @@ class Track:
         self.tile_size = data['tile_size']
         self.grid = data['grid']
         self.start_pos = data['start_position']
-        # Чекпоинты теперь хранятся как области
         self.checkpoints = data.get('checkpoints', [])
 
     def get_tile(self, x, y):
@@ -62,12 +65,10 @@ class Track:
         return SURFACE_TYPES.get(tile_id, SURFACE_TYPES[2])
 
     def is_checkpoint(self, x, y):
-        """Проверяет, находится ли точка на чекпоинте, и возвращает его ID"""
         tile_x = int(x // self.tile_size)
         tile_y = int(y // self.tile_size)
 
         for cp in self.checkpoints:
-            # Проверяем, находится ли точка в 5x5 области чекпоинта
             area_size = 2.5  # Радиус области (для 5x5 это 2)
             if cp['x'] - area_size <= tile_x <= cp['x'] + area_size and cp['y'] - area_size <= tile_y <= cp[
                 'y'] + area_size:
@@ -88,6 +89,8 @@ class Car:
         self.friction = 0.1
         self.steering = 3.0
         self.handbrake = False
+        self.prev_x = self.x
+        self.prev_y = self.y
 
         self.original_image = pygame.Surface((100, 50))
         self.original_image.fill((255, 0, 0))
@@ -96,30 +99,27 @@ class Car:
             self.original_image = pygame.transform.scale(self.original_image, (100, 50))
 
     def update(self, keys, track):
+        self.prev_x = self.x
+        self.prev_y = self.y
         # Управление газом
         if keys[pygame.K_w]:
             self.speed += self.acceleration
 
-        # Ограничение скорости
         self.speed = max(-self.max_speed / 2, min(self.speed, self.max_speed))
-
-        # Фрикцион (плавное торможение), если не нажаты W/S
         if not (keys[pygame.K_w] or keys[pygame.K_s]):
             if self.speed > 0:
                 self.speed = max(0, self.speed - self.friction)
             elif self.speed < 0:
                 self.speed = min(0, self.speed + self.friction)
 
-        # Ручной тормоз (пробел)
+        # Ручной тормоз
         self.handbrake = keys[pygame.K_SPACE]
 
         # Плавный тормоз на S: управление brake_factor
         if keys[pygame.K_s]:
-            # Постепенно снижаем сцепление (экспоненциальное затухание)
             self.brake_factor *= 0.92  # можно настроить: 0.9 = медленнее, 0.8 = быстрее
             self.brake_factor = max(0.0, self.brake_factor)
         else:
-            # Мгновенно восстанавливаем сцепление при отпускании
             self.brake_factor = 1.0
 
         # Поворот (руль)
@@ -128,26 +128,25 @@ class Car:
         if keys[pygame.K_d]:
             self.angle += self.steering * (abs(self.speed) / self.max_speed)
 
-        # Физика движения
         rad = math.radians(self.angle)
         dx = self.speed * math.cos(rad)
         dy = self.speed * math.sin(rad)
 
-        # Получаем базовое сцепление от трассы
         surf = track.get_surface_info(self.x + dx, self.y + dy)
         base_traction = surf['traction']
 
-        # Применяем тормоз (плавное снижение сцепления)
         traction = base_traction * self.brake_factor
 
-        # Ручной тормоз дополнительно снижает сцепление (если не обнулено)
         if self.handbrake and traction > 0:
             traction *= 0.05
 
         self.x += dx * traction
         self.y += dy * traction
 
-
+def get_actual_speed(self):
+    dx = self.x - self.prev_x
+    dy = self.y - self.prev_y
+    return math.hypot(dx, dy)
 class Game:
     def __init__(self, track_path, fullscreen, time_trial_mode=False):
         self.fullscreen = fullscreen
@@ -165,18 +164,17 @@ class Game:
             start.get('angle', 0)
         )
 
-        # Переменные для таймера
         self.lap_start_time = None
         self.last_lap_time = None
         self.current_lap_time = 0
         self.best_lap_time = None
-        self.checkpoints_passed = set()  # Пройденные чекпоинты
+        self.checkpoints_passed = set()
         self.laps_completed = 0
         self.race_started = False
         self.crossed_start_finish = False
-        self.start_line_crossed = False  # Новое состояние для отслеживания пересечения старта
-        self.required_checkpoints = len(self.track.checkpoints)  # Количество чекпоинтов на трассе
-        self.last_tile = None  # Тайл под машиной в предыдущем кадре
+        self.start_line_crossed = False
+        self.required_checkpoints = len(self.track.checkpoints)
+        self.last_tile = None
 
     def set_display_mode(self):
         if self.fullscreen:
@@ -203,40 +201,31 @@ class Game:
                     if event.key == pygame.K_F11:
                         self.toggle_fullscreen()
 
-            # Обновление таймера
             if self.time_trial_mode and self.race_started:
                 self.current_lap_time = (pygame.time.get_ticks() - self.lap_start_time) / 1000.0
 
-            # Проверка пересечения линий
             if self.time_trial_mode:
                 current_tile = self.track.get_tile(self.car.x, self.car.y)
 
-                # Проверяем, пересекли ли мы старт/финиш
                 if current_tile == 3:  # start_finish
                     if not self.start_line_crossed:
-                        # Первый раз пересекаем стартовую линию - начинаем гонку
                         self.start_line_crossed = True
                         self.race_started = True
                         self.lap_start_time = pygame.time.get_ticks()
                         self.checkpoints_passed = set()
                     elif self.crossed_start_finish and len(self.checkpoints_passed) == self.required_checkpoints:
-                        # Завершаем круг (пересекаем финиш после прохождения всех чекпоинтов)
                         lap_time = self.current_lap_time
                         if self.best_lap_time is None or lap_time < self.best_lap_time:
                             self.best_lap_time = lap_time
                         self.last_lap_time = lap_time
                         self.laps_completed += 1
-
-                        # Сброс для нового круга
                         self.lap_start_time = pygame.time.get_ticks()
                         self.checkpoints_passed = set()
 
-                # Проверяем, пересекли ли мы чекпоинт
                 checkpoint_id = self.track.is_checkpoint(self.car.x, self.car.y)
                 if checkpoint_id is not None and checkpoint_id not in self.checkpoints_passed:
                     self.checkpoints_passed.add(checkpoint_id)
 
-                # Обновляем флаг пересечения старт/финиш
                 if self.last_tile != 3 and current_tile == 3:
                     self.crossed_start_finish = True
                 elif self.last_tile == 3 and current_tile != 3:
@@ -249,13 +238,11 @@ class Game:
             self.clock.tick(FPS)
 
     def render(self):
-        # Камера следует за машиной
         camera_x = self.car.x - self.display_width // (2 * self.zoom)
         camera_y = self.car.y - self.display_height // (2 * self.zoom)
 
         self.screen.fill((0, 0, 0))
 
-        # Рисуем трассу с учётом масштаба
         for y in range(self.track.height):
             for x in range(self.track.width):
                 tile_id = self.track.grid[y][x]
@@ -263,39 +250,31 @@ class Game:
                 world_x = x * self.track.tile_size
                 world_y = y * self.track.tile_size
 
-                # Преобразуем мировые координаты в экранные с учётом zoom
                 screen_x = (world_x - camera_x) * self.zoom
                 screen_y = (world_y - camera_y) * self.zoom
                 scaled_tile_size = self.track.tile_size * self.zoom
 
                 rect = pygame.Rect(screen_x, screen_y, scaled_tile_size, scaled_tile_size)
-                # Отрисовываем только то, что видно (с небольшим запасом)
                 if -scaled_tile_size < screen_x < self.display_width and -scaled_tile_size < screen_y < self.display_height:
                     pygame.draw.rect(self.screen, color, rect)
 
-        # Рисуем чекпоинты как области (всего один раз для каждой области)
         area_size = 2  # Радиус области (для 5x5 это 2)
         for cp in self.track.checkpoints:
-            # Центр чекпоинта
             center_x = (cp['x'] * self.track.tile_size + self.track.tile_size // 2 - camera_x) * self.zoom
             center_y = (cp['y'] * self.track.tile_size + self.track.tile_size // 2 - camera_y) * self.zoom
             radius = int(self.track.tile_size * self.zoom * (area_size + 0.5))
 
-            # Проверяем, видна ли область на экране
             if (center_x - radius < self.display_width and center_x + radius > 0 and
                     center_y - radius < self.display_height and center_y + radius > 0):
                 pygame.draw.circle(self.screen, (0, 255, 255), (center_x, center_y), radius, max(1, int(2 * self.zoom)))
-                # Рисуем номер чекпоинта в центре
                 font = pygame.font.SysFont(None, int(self.track.tile_size * self.zoom * 0.5))
                 text = font.render(str(cp['id']), True, (0, 0, 0))
                 text_rect = text.get_rect(center=(center_x, center_y))
                 self.screen.blit(text, text_rect)
 
-        # Рисуем машину
         car_screen_x = (self.car.x - camera_x) * self.zoom
         car_screen_y = (self.car.y - camera_y) * self.zoom
 
-        # Масштабируем изображение машины (опционально, для соответствия)
         scaled_car = pygame.transform.scale(
             self.car.original_image,
             (int(100 * self.zoom), int(50 * self.zoom))
@@ -304,34 +283,27 @@ class Game:
         car_rect = rotated_image.get_rect(center=(car_screen_x, car_screen_y))
         self.screen.blit(rotated_image, car_rect.topleft)
 
-        # Отрисовка информации о времени (если в режиме гонки)
         if self.time_trial_mode:
             font = pygame.font.SysFont(None, 24)
 
-            # Текущее время круга
             lap_text = font.render(f"Время круга: {self.current_lap_time:.2f}s", True, (255, 255, 255))
             self.screen.blit(lap_text, (10, 10))
 
-            # Последнее время круга
             if self.last_lap_time:
                 last_lap_text = font.render(f"Последний круг: {self.last_lap_time:.2f}s", True, (200, 200, 255))
                 self.screen.blit(last_lap_text, (10, 40))
 
-            # Лучшее время круга
             if self.best_lap_time:
                 best_lap_text = font.render(f"Лучший круг: {self.best_lap_time:.2f}s", True, (255, 255, 100))
                 self.screen.blit(best_lap_text, (10, 70))
 
-            # Количество пройденных кругов
             laps_text = font.render(f"Круги: {self.laps_completed}", True, (100, 255, 100))
             self.screen.blit(laps_text, (10, 100))
 
-            # Прогресс чекпоинтов
             progress_text = font.render(f"Чекпоинты: {len(self.checkpoints_passed)}/{self.required_checkpoints}", True,
                                         (200, 255, 200))
             self.screen.blit(progress_text, (10, 130))
 
-            # Статус гонки
             status = "ГОНКА НАЧАТА" if self.race_started else "ПЕРЕСЕКИТЕ СТАРТ"
             status_color = (0, 255, 0) if self.race_started else (255, 255, 0)
             status_text = font.render(status, True, status_color)
@@ -353,12 +325,9 @@ def run_track_editor(slot_name="track_01.json"):
 
     track_path = os.path.join("tracks", slot_name)
 
-    # Загрузка существующей трассы (если есть)
     if os.path.exists(track_path):
         with open(track_path, 'r') as f:
             data = json.load(f)
-        # ВСЕГДА используем LOGICAL_TILE_SIZE при загрузке!
-        # Но сетка и размеры остаются те же
         width = min(data['width'], MAX_GRID_WIDTH)
         height = min(data['height'], MAX_GRID_HEIGHT)
         grid = data['grid']
@@ -406,7 +375,6 @@ def run_track_editor(slot_name="track_01.json"):
     running = True
     while running:
         mouse_x, mouse_y = pygame.mouse.get_pos()
-        # 🔹 Преобразуем ПИКСЕЛИ → КООРДИНАТЫ ТАЙЛОВ (через EDITOR_PIXEL_SIZE)
         tile_x = mouse_x // EDITOR_PIXEL_SIZE
         tile_y = mouse_y // EDITOR_PIXEL_SIZE
 
@@ -424,12 +392,11 @@ def run_track_editor(slot_name="track_01.json"):
                 if event.key == pygame.K_w: brush_size = 3
                 if event.key == pygame.K_e: brush_size = 5
                 if event.key == pygame.K_s:
-                    # 🔹 Сохраняем с LOGICAL_TILE_SIZE!
                     track_data = {
                         "name": f"Custom Track - {slot_name}",
                         "width": width,
                         "height": height,
-                        "tile_size": LOGICAL_TILE_SIZE,  # ← ВАЖНО!
+                        "tile_size": LOGICAL_TILE_SIZE,
                         "grid": grid,
                         "start_position": start_pos,
                         "checkpoints": checkpoints
@@ -437,9 +404,8 @@ def run_track_editor(slot_name="track_01.json"):
                     with open(track_path, "w") as f:
                         json.dump(track_data, f, indent=2)
                     print(f"✅ Сохранено: {track_path} (tile_size={LOGICAL_TILE_SIZE})")
-                if event.key == pygame.K_c:  # Поставить чекпоинт
+                if event.key == pygame.K_c:
                     if 0 <= tile_x < width and 0 <= tile_y < height:
-                        # Проверяем, нет ли уже чекпоинта в этой позиции
                         exists = False
                         for cp in checkpoints:
                             if cp['x'] == tile_x and cp['y'] == tile_y:
@@ -454,7 +420,6 @@ def run_track_editor(slot_name="track_01.json"):
                             })
                             checkpoint_counter += 1
                         else:
-                            # Удаляем чекпоинт если уже есть
                             checkpoints = [cp for cp in checkpoints if not (cp['x'] == tile_x and cp['y'] == tile_y)]
 
             if event.type == pygame.MOUSEBUTTONDOWN:
@@ -471,7 +436,6 @@ def run_track_editor(slot_name="track_01.json"):
                 if 0 <= tile_x < width and 0 <= tile_y < height:
                     apply_brush(tile_x, tile_y, brush_size, current_type)
 
-        # 🔹 Отрисовка: используем EDITOR_PIXEL_SIZE для размера тайлов на экране
         screen.fill((0, 0, 0))
         for y in range(height):
             for x in range(width):
@@ -484,20 +448,16 @@ def run_track_editor(slot_name="track_01.json"):
                     pygame.draw.rect(screen, color, rect)
                     pygame.draw.rect(screen, (50, 50, 50), rect, 1)
 
-                    # Рисуем чекпоинты как 3x3 области
                     for cp in checkpoints:
                         if cp['x'] - 1 <= x <= cp['x'] + 1 and cp['y'] - 1 <= y <= cp['y'] + 1:
-                            # Рисуем кольцо вокруг чекпоинта
                             center_x = cp['x'] * EDITOR_PIXEL_SIZE + EDITOR_PIXEL_SIZE // 2
                             center_y = cp['y'] * EDITOR_PIXEL_SIZE + EDITOR_PIXEL_SIZE // 2
                             radius = int(EDITOR_PIXEL_SIZE * 1.5)
                             pygame.draw.circle(screen, (0, 255, 255), (center_x, center_y), radius, 2)
-                            # Рисуем номер чекпоинта в центре
                             text = font.render(str(cp['id']), True, (0, 0, 0))
                             text_rect = text.get_rect(center=(center_x, center_y))
                             screen.blit(text, text_rect)
 
-        # Стартовая позиция (отображается в редакторе)
         sx = start_pos["x"] * EDITOR_PIXEL_SIZE + EDITOR_PIXEL_SIZE // 2
         sy = start_pos["y"] * EDITOR_PIXEL_SIZE + EDITOR_PIXEL_SIZE // 2
         if 0 <= sx < win_w and 0 <= sy < win_h - 60:
@@ -563,7 +523,7 @@ def track_selection_menu(fullscreen):
                 sys.exit()
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    return None, fullscreen, False  # Вернуться в меню
+                    return None, fullscreen, False
                 if event.key == pygame.K_F11:
                     fullscreen = not fullscreen
                     if fullscreen:
@@ -578,13 +538,11 @@ def track_selection_menu(fullscreen):
                     selected = (selected + 1) % len(track_files)
                 if event.key == pygame.K_RETURN:
                     if track_files[0] != "Нет трасс!":
-                        # Спрашиваем режим игры
                         mode_selected = game_mode_selection(screen, w, h, font)
                         if mode_selected is not None:
                             return os.path.join("tracks", track_files[selected]), fullscreen, mode_selected
             if event.type == pygame.MOUSEBUTTONDOWN:
                 if track_files[0] != "Нет трасс!":
-                    # Спрашиваем режим игры
                     mode_selected = game_mode_selection(screen, w, h, font)
                     if mode_selected is not None:
                         return os.path.join("tracks", track_files[selected]), fullscreen, mode_selected
@@ -604,7 +562,6 @@ def track_selection_menu(fullscreen):
 
 
 def game_mode_selection(screen, w, h, font):
-    """Выбор режима игры: свободный или с временем"""
     modes = ["Свободный режим", "Режим с временем"]
     selected = 0
     running = True
@@ -620,9 +577,9 @@ def game_mode_selection(screen, w, h, font):
                 if event.key == pygame.K_DOWN:
                     selected = (selected + 1) % len(modes)
                 if event.key == pygame.K_RETURN:
-                    return selected == 1  # True для режима с временем
+                    return selected == 1
                 if event.key == pygame.K_ESCAPE:
-                    return None  # Вернуться к выбору трассы
+                    return None
             if event.type == pygame.MOUSEBUTTONDOWN:
                 return selected == 1
 
@@ -753,7 +710,7 @@ def main_menu():
             if buttons[1].is_clicked(event):
                 slot, fullscreen = slot_selection_menu(fullscreen)
                 if slot:
-                    run_track_editor(slot)  # ← Теперь используется ОБНОВЛЁННЫЙ редактор!
+                    run_track_editor(slot)
                     if fullscreen:
                         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
                         w, h = NATIVE_WIDTH, NATIVE_HEIGHT
@@ -777,7 +734,134 @@ def main_menu():
         pygame.display.flip()
         clock.tick(FPS)
 
+# === RacerEnv (ИИ) ===
+class RacerEnv:
+    def __init__(self, track_path):
+        self.track = Track(track_path)
+        start = self.track.start_pos
+        self.car = Car(
+            start['x'] * self.track.tile_size + self.track.tile_size // 2,
+            start['y'] * self.track.tile_size + self.track.tile_size // 2,
+            start.get('angle', 0)
+        )
+        self.done = False
+
+    def cast_ray(self, angle_offset, max_distance=200):
+        rad = math.radians(self.car.angle + angle_offset)
+        for d in range(0, max_distance, 4):
+            check_x = self.car.x + d * math.cos(rad)
+            check_y = self.car.y + d * math.sin(rad)
+            tile = self.track.get_tile(check_x, check_y)
+            if tile == 0 or tile == 2:  # offroad или curb
+                return d / max_distance
+        return 1.0
+
+    def reset(self):
+        start = self.track.start_pos
+        self.car.x = start['x'] * self.track.tile_size + self.track.tile_size // 2
+        self.car.y = start['y'] * self.track.tile_size + self.track.tile_size // 2
+        self.car.angle = start.get('angle', 0)
+        self.car.speed = 0
+        self.done = False
+        return self.get_state()
+
+    def get_state(self):
+        min_speed = -self.car.max_speed / 2
+        speed_range = self.car.max_speed - min_speed
+        norm_speed = (self.car.speed - min_speed) / speed_range
+        norm_speed = np.clip(norm_speed, 0.0, 1.0)
+
+        angle_rad = math.radians(self.car.angle)
+        sin_a = (math.sin(angle_rad) + 1.0) / 2.0
+        cos_a = (math.cos(angle_rad) + 1.0) / 2.0
+
+        angles = [-90, -45, 0, 45, 90]
+        rays = [self.cast_ray(a) for a in angles]
+
+        return np.array([norm_speed, sin_a, cos_a] + rays, dtype=np.float32)
+
+    def step(self, action):
+        keys = self.action_to_keys(action)
+        self.car.update(keys, self.track)
+
+        tile = self.track.get_tile(self.car.x, self.car.y)
+        reward = 0.0
+        self.done = False
+
+        # 🔴 Трава = смерть
+        if tile == 0:
+            reward = -50.0
+            self.done = True
+        else:
+            if tile in (1, 3):  # asphalt / start_finish
+                reward += 0.5 * self.car.speed #бонус за скорость
+            elif tile == 2:  # curb — штраф
+                reward -= 0.5
+
+            if abs(self.car.speed) < 0.5:
+                reward -= 1.0
+
+            current_cp = self.track.is_checkpoint(self.car.x, self.car.y)
+            if current_cp is not None and current_cp != self.last_checkpoint:
+                reward += 5.0
+            self.last_checkpoint = current_cp
+
+        return self.get_state(), reward, self.done, {}
+
+    def action_to_keys(self, action):
+        keys = {
+            pygame.K_w: False,
+            pygame.K_s: False,
+            pygame.K_a: False,
+            pygame.K_d: False,
+            pygame.K_SPACE: False
+        }
+        if action == 0:
+            keys[pygame.K_w] = True
+        elif action == 1:
+            keys[pygame.K_s] = True
+        elif action == 2:
+            keys[pygame.K_a] = True
+        elif action == 3:
+            keys[pygame.K_d] = True
+        elif action == 4:
+            keys[pygame.K_w] = True
+            keys[pygame.K_a] = True
+        elif action == 5:
+            keys[pygame.K_w] = True
+            keys[pygame.K_d] = True
+        elif action == 6:
+            keys[pygame.K_s] = True
+            keys[pygame.K_a] = True
+        elif action == 7:
+            keys[pygame.K_s] = True
+            keys[pygame.K_d] = True
+        return keys
+
+class GymRacerEnv(gym.Env):
+    def __init__(self, track_path):
+        super().__init__()
+        self.racer_env = RacerEnv(track_path)
+
+        self.action_space = gym.spaces.Discrete(8)
+        self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(8,), dtype=np.float32)
+
+    def reset(self, *, seed=None, options=None):
+        if seed is not None:
+            pass
+        obs = self.racer_env.reset()
+        return obs, {}
+
+    def step(self, action):
+        obs, reward, done, info = self.racer_env.step(action)
+        terminated = done
+        truncated = False
+        return obs, reward, terminated, truncated, info
+
+    def render(self):
+        pass
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
     main_menu()
+
