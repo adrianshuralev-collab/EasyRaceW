@@ -1,1 +1,6 @@
-
+pygame>=2.1.0
+numpy>=1.23
+gymnasium>=0.28.0
+gym>=0.26.0
+stable-baselines3>=1.8.0
+torch>=1.12.0
